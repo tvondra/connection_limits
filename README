@@ -1,0 +1,72 @@
+Setting connection quotas
+=========================
+This PostgreSQL extension allows you to set connection quotas for each
+database, user, IP (or a combination of those values).
+
+
+Install
+-------
+Installing the extension is quite simple. First you need to do is this:
+
+   $ make install
+
+which installs both libraries to $libdir (pg_config --pkglibdir). Then
+you need to copy one of the libraries to 'plugins' subdir, so that it
+can be loaded by local_preload_libraries
+
+   $ cp `pg_config --pkglibdir`/connection_limits_local.so \
+        `pg_config --pkglibdir`/plugins/
+
+If the directory $libdir/plugins directory does not exist, create it.
+
+Now you need to update postgresql.conf so that the libraries are loaded.
+
+   shared_preload_libraries = 'connection_limits_shared'
+   local_preload_libraries = 'connection_limits_local'
+
+Restart the database (so that the shared library is loaded).
+
+
+Config
+------
+The last thing you need to do is to create the configuration file with
+rules, defining the connection quotas. The file should be placed in the
+data directory, the expected filename is pg_limits.conf.
+
+   $ touch data/pg_limits.conf
+
+and the format is very simple, with four or five columns:
+
+    database     username    IP    [mask]    limit
+
+A special value 'all' means 'do not check' so for example this rule
+
+    all          foouser     all             10
+
+means user 'foouser' can create up to 10 connections in total. He may
+be connected to one database or 10 different databases, it does not
+matter - he's allowed to create 10 connections in total. This rules
+
+    foodb         all        all             10
+
+means there will be at most 10 connection to the 'foodb' database. You
+may of course combine those rules, so this
+
+    foodb         foouser    all             10
+
+means the user 'foouser' can create at most 10 connections to 'foodb'.
+Other users are not limited at all, and even 'foouser' may create
+unlimited number of connections to other databases.
+
+There are two ways to specify an IP address - the mask may be specified
+as part of the IP, or separately. The following two rules are equal
+
+    all    all    all    192.168.1.0/24                    10
+    all    all    all    192.168.1.0      255.255.255.0    10
+
+So basically it's just like in pg_hba.conf.
+
+
+Notice that the superusers are not restricted by this module - the
+connections are counted, but the connection is not denied (just a
+WARNING is printed).
