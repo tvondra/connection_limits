@@ -10,19 +10,12 @@ Installing the extension is quite simple. First you need to do is this:
 
    $ make install
 
-which installs both libraries to $libdir (pg_config --pkglibdir). Then
-you need to copy one of the libraries to 'plugins' subdir, so that it
-can be loaded by local_preload_libraries
+which installs a library to $libdir (pg_config --pkglibdir).
 
-   $ cp `pg_config --pkglibdir`/connection_limits_local.so \
-        `pg_config --pkglibdir`/plugins/
+Now you need to update postgresql.conf so that the shared library is
+loaded when the cluster starts.
 
-If the directory $libdir/plugins directory does not exist, create it.
-
-Now you need to update postgresql.conf so that the libraries are loaded.
-
-   shared_preload_libraries = 'connection_limits_shared'
-   local_preload_libraries = 'connection_limits_local'
+   shared_preload_libraries = 'connection_limits'
 
 Restart the database (so that the shared library is loaded).
 

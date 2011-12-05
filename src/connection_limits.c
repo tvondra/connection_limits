@@ -1,35 +1,37 @@
 #include <stdio.h>
 #include <unistd.h>
 
+#include <arpa/inet.h>
+
+#include <netinet/in.h>
+
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/ipc.h>
-
 #include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 
 #include "postgres.h"
-#include "miscadmin.h"
-#include "storage/ipc.h"
-#include "storage/fd.h"
+#include "port.h"
+
+#include "access/sysattr.h"
+#include "access/twophase.h"
+
+#include "catalog/indexing.h"
+#include "catalog/pg_authid.h"
+
+#include "commands/dbcommands.h"
+
+#include "executor/executor.h"
 
 #include "libpq/auth.h"
 #include "libpq/ip.h"
-#include "port.h"
-#include "pgstat.h"
-
-#include "access/sysattr.h"
-#include "catalog/pg_database.h"
-#include "catalog/pg_authid.h"
+#include "miscadmin.h"
+#include "storage/proc.h"
+#include "storage/ipc.h"
 #include "utils/fmgroids.h"
-#include "catalog/indexing.h"
 #include "utils/tqual.h"
 
-#include "executor/executor.h"
-#include "commands/dbcommands.h"
-
-#include "conn_limits.h"
+#include "connection_limits.h"
 
 /* allocates space for the rules */
 static void pg_limits_shmem_startup(void);
@@ -51,8 +53,14 @@ static void load_rules(void);
 
 static bool load_rule(int line, const char * dbname, const char * user, const char * ip, const char * mask, int limit);
 
-static bool
-check_ip(SockAddr *raddr, struct sockaddr * addr, struct sockaddr * mask);
+static bool check_ip(SockAddr *raddr, struct sockaddr * addr, struct sockaddr * mask);
+
+static bool attach_procarray(void);
+
+static bool backend_is_valid(BackendInfo info, pid_t pid);
+static void backend_update_info(BackendInfo * info, pid_t pid, char * database, char * role, SockAddr socket);
+
+static bool is_super_user(char * rolename);
 
 /* Saved hook values in case of unload */
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
@@ -60,16 +68,11 @@ static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 /* Original Hook */
 static ClientAuthentication_hook_type prev_client_auth_hook = NULL;
 
-/* read info about database / role */
-static HeapTuple GetDatabaseTupleByOid(Oid dboid);
-static HeapTuple GetRoleTupleByOid(Oid roleoid);
-
-/* read name of the database / role */
-static void get_role_name(Oid roleoid, char * rolename);
-static void get_db_name(Oid dboid, char * dbname);
-
 /* set of rules and a lock */
 static rules_t * rules = NULL;
+static BackendInfo * backends = NULL;
+
+static ProcArrayStruct *procArray = NULL;
 
 void		_PG_init(void);
 void		_PG_fini(void);
@@ -142,16 +145,14 @@ void pg_limits_shmem_startup() {
 
 	/* set the pointers */
 	rules = (rules_t*)(segment);
-		
+	backends = (BackendInfo*)(segment + sizeof(rule_t) * (MAX_RULES-1) + sizeof(rules_t));
+	
 	elog(DEBUG1, "initializing segment with connection limit rules (size: %lu B)",
 		 SEGMENT_SIZE);
 
 	if (! found) {
 		
 		memset(rules, 0, SEGMENT_SIZE);
-		
-		/* First time through ... */
-		rules->lock = LWLockAssign();
 		
 		load_rules();
 		
@@ -382,8 +383,7 @@ static
 void rules_check(Port *port, int status)
 {
 
-	int b, r, nbackends;
-	PgBackendStatus *beentry;
+	int r;
 
 	/*
 	 * Any other plugins which use ClientAuthentication_hook.
@@ -396,50 +396,63 @@ void rules_check(Port *port, int status)
 	 */
 	if (status == STATUS_OK)
 	{
+		
+		int			index;
+		
+		elog(WARNING, "rule check start");
 
-		char b_user[NAME_MAXLEN];
-		char b_database[NAME_MAXLEN];
-
-		/* lock the segment (serializes the backend creation) */
-		LWLockAcquire(rules->lock, LW_EXCLUSIVE);
+		/* lock ProcArray (serialize the processes) */
+		LWLockAcquire(ProcArrayLock, LW_SHARED);
 
 		/* reset the rules */
 		rules_reset();
 		
-		/* how many backends are already there ? */
-		nbackends = pgstat_fetch_stat_numbackends();
+		/* attach the shared segment */
+		attach_procarray();
 		
-		/* loop through the backends and check the rules for each of them */
-		for (b = 1; b <= nbackends; b++) {
+		for (index = 0; index < procArray->numProcs; index++)
+		{
+		
+			volatile PGPROC *proc = procArray->procs[index];
 			
-			beentry = pgstat_fetch_stat_beentry(b);
-
-			/* pgstatfuncs.c : 630 */
-			if (beentry != NULL) {
+			if (proc->pid == 0) {
+				/* do not count prepared xacts */
+				continue;
+			} else {
 				
+				/* if this is the backend, then update the local info */
+				if (proc->backendId == MyBackendId) {
+					backend_update_info(&backends[proc->backendId], proc->pid,
+										port->database_name, port->user_name, port->raddr);
+				}
+				
+				/* check all the rules for this backend */
 				for (r = 0; r < rules->n_rules; r++) {
 					
 					/* the rule has to matche both the backend and the current session
 					 * at the same time */
 					if (rule_matches(rules->rules[r], port->database_name, port->user_name, port->raddr)) {
-
-						/* find the username / password only if needed (the current backend matches the rule) */
-						get_db_name(beentry->st_databaseid, b_database);
-						get_role_name(beentry->st_userid, b_user);
 						
-						if (rule_matches(rules->rules[r], b_database, b_user, beentry->st_clientaddr)) {
+						/* check the rule for a backend - if the PID is different, the backend is
+						 * waiting on the lock (and will be processed soon) */
+						if (backend_is_valid(backends[proc->backendId], proc->pid) &&
+							(rule_matches(rules->rules[r], backends[proc->backendId].database,
+										  backends[proc->backendId].role, backends[proc->backendId].socket))) {
 									
 							/* increment the count */
 							++rules->rules[r].count;
 						
 							/* the current backend is not if pg_stat_backends yet, so equality
 							* actually means the limit was crossed */
-							if (rules->rules[r].count >= rules->rules[r].limit) {
+							if (rules->rules[r].count > rules->rules[r].limit) {
 								
-								elog(WARNING, "connection limit reached (rule %d, line %d, limit %d)",
-											r, rules->rules[r].line, rules->rules[r].limit);
-								
-								rules->fail = true;
+								if (! is_super_user(port->user_name)) {
+									elog(ERROR, "connection limit reached (rule %d, line %d, limit %d)",
+												r, rules->rules[r].line, rules->rules[r].limit);
+								} else {
+									elog(WARNING, "connection limit reached (rule %d, line %d, limit %d), but the user is a superuser",
+												r, rules->rules[r].line, rules->rules[r].limit);
+								}
 								
 							} /* limit reached */
 							
@@ -449,9 +462,10 @@ void rules_check(Port *port, int status)
 					
 				} /* for (r = 0; r < rules->n_rules; r++) */
 				
-			} /* (beentry != NULL) */
-			
-		} /* for (b = 1; b <= nbackends; b++) */
+			}
+		}
+
+		LWLockRelease(ProcArrayLock);
 
 	} /* (status == STATUS_OK) */
 
@@ -478,8 +492,6 @@ bool rule_matches(rule_t rule, const char * dbname, const char * user, SockAddr 
 		}
 	}
 	
-	elog(WARNING, "rule matches");
-	
 	return true;
 	
 }
@@ -490,7 +502,6 @@ void rules_reset() {
 	for (i = 0; i < rules->n_rules; i++) {
 		rules->rules[i].count = 0;
 	}
-	rules->fail = false;
 }
 
 /*
@@ -538,78 +549,74 @@ check_ip(SockAddr *raddr, struct sockaddr * addr, struct sockaddr * mask)
 		return true;
 }
 
-/*
- * GetDatabaseTupleByOid -- as above, but search by database OID
- */
-static HeapTuple
-GetDatabaseTupleByOid(Oid dboid)
-{
-	HeapTuple	tuple;
-	Relation	relation;
-	SysScanDesc scan;
-	ScanKeyData key[1];
+static
+bool attach_procarray() {
+	
+	bool		found;
+	
+	/* already attached */
+	if (procArray != NULL) {
+		return true;
+	}
 
-	/*
-	 * form a scan key
-	 */
-	ScanKeyInit(&key[0],
-				ObjectIdAttributeNumber,
-				BTEqualStrategyNumber, F_OIDEQ,
-				ObjectIdGetDatum(dboid));
+	/* Create or attach to the ProcArray shared structure */
+	procArray = (ProcArrayStruct *)
+		ShmemInitStruct("Proc Array",
+						add_size(offsetof(ProcArrayStruct, procs),
+								 mul_size(sizeof(PGPROC *),
+										  PROCARRAY_MAXPROCS)),
+						&found);
+	if (! found) {
+		elog(ERROR, "the Proc Array shared segment was not found");
+		return false;
+	}
+	
+	return true;
 
-	/*
-	 * Open pg_database and fetch a tuple.	Force heap scan if we haven't yet
-	 * built the critical shared relcache entries (i.e., we're starting up
-	 * without a shared relcache cache file).
-	 */
-	relation = heap_open(DatabaseRelationId, AccessShareLock);
-	scan = systable_beginscan(relation, DatabaseOidIndexId,
-							  criticalSharedRelcachesBuilt,
-							  SnapshotNow,
-							  1, key);
+}
 
-	tuple = systable_getnext(scan);
+static void backend_update_info(BackendInfo * info, pid_t pid, char * database, char * role, SockAddr socket) {
+	
+	info->pid = pid;
+	strcpy(info->database, database);
+	strcpy(info->role, role);
+	memcpy(&info->socket, &socket, sizeof(SockAddr));
+	
+}
 
-	/* Must copy tuple before releasing buffer */
-	if (HeapTupleIsValid(tuple))
-		tuple = heap_copytuple(tuple);
-
-	/* all done */
-	systable_endscan(scan);
-	heap_close(relation, AccessShareLock);
-
-	return tuple;
+static bool backend_is_valid(BackendInfo info, pid_t pid) {
+	return (info.pid == pid);
 }
 
 /*
- * GetRoleTupleByOid -- as above, but search by role OID
- */
+* GetRoleTupleByOid -- as above, but search by role OID
+*/
 static HeapTuple
-GetRoleTupleByOid(Oid roleoid)
+GetRoleTupleByName(const char * rolename)
 {
-	HeapTuple	tuple;
-	Relation	relation;
+	HeapTuple tuple;
+	Relation relation;
 	SysScanDesc scan;
 	ScanKeyData key[1];
 
 	/*
-	 * form a scan key
-	 */
+	* form a scan key
+	*/
 	ScanKeyInit(&key[0],
-				ObjectIdAttributeNumber,
-				BTEqualStrategyNumber, F_OIDEQ,
-				ObjectIdGetDatum(roleoid));
+				Anum_pg_authid_rolname,
+				BTEqualStrategyNumber, F_NAMEEQ,
+				CStringGetDatum(rolename));
 
 	/*
-	 * Open pg_authid and fetch a tuple.	Force heap scan if we haven't yet
-	 * built the critical shared relcache entries (i.e., we're starting up
-	 * without a shared relcache cache file).
-	 */
+	* Open pg_authid and fetch a tuple. Force heap scan if we haven't yet
+	* built the critical shared relcache entries (i.e., we're starting up
+	* without a shared relcache cache file).
+	*/
 	relation = heap_open(AuthIdRelationId, AccessShareLock);
-	scan = systable_beginscan(relation, DatabaseOidIndexId,
-							  criticalSharedRelcachesBuilt,
-							  SnapshotNow,
-							  1, key);
+	scan = systable_beginscan(relation, AuthIdRolnameIndexId,
+							criticalSharedRelcachesBuilt,
+							SnapshotNow,
+							1, key);
 
 	tuple = systable_getnext(scan);
 
@@ -625,33 +632,17 @@ GetRoleTupleByOid(Oid roleoid)
 }
 
 static
-void get_db_name(Oid dboid, char * dbname) {
-	
-	HeapTuple tuple = GetDatabaseTupleByOid(dboid);
-	Form_pg_database dbform;
-	
-	if (!HeapTupleIsValid(tuple)) {
-		elog(FATAL, "database %u does not exist", dboid);
-	}
-	
-	dbform = (Form_pg_database) GETSTRUCT(tuple);
-	
-	strncpy(dbname, NameStr(dbform->datname), NAME_MAXLEN);
-	
-}
+bool is_super_user(char * rolename) {
 
-static
-void get_role_name(Oid roleoid, char * rolename) {
-	
-	HeapTuple tuple = GetRoleTupleByOid(roleoid);
+	HeapTuple tuple = GetRoleTupleByName(rolename);
 	Form_pg_authid roleform;
-	
+
 	if (!HeapTupleIsValid(tuple)) {
-		elog(FATAL, "role %u does not exist", roleoid);
+		elog(FATAL, "role %s does not exist", rolename);
 	}
-	
+
 	roleform = (Form_pg_authid) GETSTRUCT(tuple);
-	
-	strncpy(rolename, NameStr(roleform->rolname), NAME_MAXLEN);
-	
+
+	return (roleform->rolsuper);
+
 }
