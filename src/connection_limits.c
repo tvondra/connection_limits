@@ -47,12 +47,13 @@ static void pg_limits_shmem_startup(void);
 
 /* check the rules (using pg_stat_activity) */
 static void check_rules(Port *port, int status);
+static void check_all_rules(void);
 
 /* resets the counters to 0 */
 static void reset_rules(void);
 
 /* check that a particular rule matches the database name / username */
-static bool rule_matches(rule_t rule, const char * dbname, const char * username, SockAddr ip);
+static bool rule_matches(rule_t rule, const char * dbname, const char * username, SockAddr ip, char * hostname);
 
 /* count rules in the config file */
 static int number_of_rules(void);
@@ -67,13 +68,15 @@ static bool check_ip(SockAddr *raddr, struct sockaddr * addr, struct sockaddr * 
 static bool attach_procarray(void);
 
 static bool backend_info_is_valid(BackendInfo info, pid_t pid);
-static void backend_update_info(BackendInfo * info, pid_t pid, char * database, char * role, SockAddr socket);
+static void backend_update_info(BackendInfo * info, pid_t pid, char * database, char * role, SockAddr socket, char * hostname);
 
 static bool is_super_user(char * rolename);
 
 static bool rule_is_per_ip(rule_t * rule);
 static bool rule_is_per_database(rule_t * rule);
 static bool rule_is_per_user(rule_t * rule);
+
+static void format_address(char * dest, int destlen, struct sockaddr * addr, struct sockaddr * mask);
 
 /* Saved hook values in case of unload */
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
@@ -337,7 +340,7 @@ bool load_rule(int line, const char * dbname, const char * user, const char * ip
 		rule->fields |= CHECK_USER;
 	}
 	
-	/* FIXME load the IP (see parse_hba_line in hba.c) */
+	/* load the IP (see parse_hba_line in hba.c) */
 	if (strcmp("all", ip) != 0) {
 
 		int ret;
@@ -363,7 +366,6 @@ bool load_rule(int line, const char * dbname, const char * user, const char * ip
 		
 		/* try to parse the IP address */
 		ret = pg_getaddrinfo_all(ipcopy, NULL, &hints, &gai_result);
-		
 		if (ret == 0 && gai_result)
 		{
 			memcpy(&(rule->ip), gai_result->ai_addr, gai_result->ai_addrlen);
@@ -402,7 +404,7 @@ bool load_rule(int line, const char * dbname, const char * user, const char * ip
 				return false;
 			}
 		}
-		else if (strlen(rule->hostname) != 0)
+		else if (strlen(rule->hostname) == 0)
 		{
 			if (mask == NULL) {
 				elog(WARNING,
@@ -496,7 +498,8 @@ void check_rules(Port *port, int status)
 				/* if this is the backend, then update the local info */
 				if (proc->backendId == MyBackendId) {
 					backend_update_info(&backends[proc->backendId], proc->pid,
-										port->database_name, port->user_name, port->raddr);
+										port->database_name, port->user_name, port->raddr,
+										port->remote_hostname);
 				}
 				
 				/* do this only if the backend is valid */
@@ -512,7 +515,7 @@ void check_rules(Port *port, int status)
 						
 						/* the rule has to matche both the backend and the current session
 						* at the same time */
-						if (rule_matches(rules->rules[r], port->database_name, port->user_name, port->raddr)) {
+						if (rule_matches(rules->rules[r], port->database_name, port->user_name, port->raddr, port->remote_host)) {
 							
 							/* check if this rule overrides per-db, per-user or per-ip limits */
 							per_database_overriden = per_database_overriden || rule_is_per_database(&rules->rules[r]);
@@ -522,7 +525,8 @@ void check_rules(Port *port, int status)
 							/* check the rule for a backend - if the PID is different, the backend is
 							* waiting on the lock (and will be processed soon) */
 							if (rule_matches(rules->rules[r], backends[proc->backendId].database,
-											backends[proc->backendId].role, backends[proc->backendId].socket)) {
+											backends[proc->backendId].role, backends[proc->backendId].socket,
+											backends[proc->backendId].hostname)) {
 										
 								/* increment the count */
 								++rules->rules[r].count;
@@ -591,7 +595,51 @@ void check_rules(Port *port, int status)
 }
 
 static
-bool rule_matches(rule_t rule, const char * dbname, const char * user, SockAddr ip) {
+void check_all_rules(void)
+{
+
+	/* index of the process */
+	int	index;
+	int r;
+
+	for (index = 0; index < procArray->numProcs; index++)
+	{
+
+		volatile PGPROC *proc = procArray->procs[index];
+
+		if (proc->pid == 0) {
+			/* do not count prepared xacts */
+			continue;
+		} else {
+		
+			/* do this only if the backend is valid */
+			if (backend_info_is_valid(backends[proc->backendId], proc->pid)) {
+				
+				/* check all the rules for this backend */
+				for (r = 0; r < rules->n_rules; r++) {
+					
+					/* check the rule for a backend - if the PID is different, the backend is
+					* waiting on the lock (and will be processed soon) */
+					if (rule_matches(rules->rules[r], backends[proc->backendId].database,
+										backends[proc->backendId].role, backends[proc->backendId].socket,
+										backends[proc->backendId].hostname)) {
+									
+						/* increment the count */
+						++rules->rules[r].count;
+						
+					} /* rule_matches(record from pg_stat_activity) */
+					
+				} /* for (r = 0; r < rules->n_rules; r++) */
+				
+			} /* if (backend_is_valid(...)) */
+		}
+		
+	} /* for (index = 0; index < procArray->numProcs; index++) */
+
+}
+
+static
+bool rule_matches(rule_t rule, const char * dbname, const char * user, SockAddr ip, char * hostname) {
 	
 	/* dbname does not match */
 	if ((rule.fields & CHECK_DBNAME) && (strcmp(rule.database, dbname) != 0)) {
@@ -603,13 +651,18 @@ bool rule_matches(rule_t rule, const char * dbname, const char * user, SockAddr 
 		return false;
 	}
 	
-	// FIXME check IP
+	/* check the IP address (mask etc.) */
+	/* FIXME This needs to check the hostname somehow. */
 	if (rule.fields & CHECK_IP) {
 		
 		if (! check_ip(&ip, (struct sockaddr *)&rule.ip, (struct sockaddr *)&rule.mask)) {
 			return false;
 		}
+		
+	} else if ((rule.fields & CHECK_HOST) && (strcmp(rule.hostname, hostname) != 0)) {
+		return false;
 	}
+
 	
 	return true;
 	
@@ -696,12 +749,19 @@ bool attach_procarray() {
 
 /* 
  */
-static void backend_update_info(BackendInfo * info, pid_t pid, char * database, char * role, SockAddr socket) {
+static void backend_update_info(BackendInfo * info, pid_t pid, char * database, char * role, SockAddr socket, char * hostname) {
 	
 	info->pid = pid;
 	strcpy(info->database, database);
 	strcpy(info->role, role);
 	memcpy(&info->socket, &socket, sizeof(SockAddr));
+	
+	/* update the hostname, but carefully as it may be NULL */
+	if (hostname != NULL) {
+		strcpy(info->hostname, hostname);
+	} else {
+		info->hostname[0] = '\0';
+	}
 	
 }
 
@@ -801,6 +861,9 @@ connection_limits(PG_FUNCTION_ARGS)
 
 		LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
 		
+		reset_rules();
+		check_all_rules();
+		
 		/* number of rules */
 		funcctx->max_calls = rules->n_rules;
 		
@@ -858,11 +921,12 @@ connection_limits(PG_FUNCTION_ARGS)
 		
 		/* hostname or IP address */
 		if (rule->fields & CHECK_HOST) {
-			/* FIXME proper INET output */
 			values[3] = CStringGetTextDatum(rule->hostname);
 		} else if (rule->fields & CHECK_IP) {
-			/* FIXME proper INET output */
-			values[3] = CStringGetTextDatum("\0");
+			char buffer[256];
+			memset(buffer, 0, 256);
+			format_address(buffer, 256, (struct sockaddr*)&rule->ip, (struct sockaddr*)&rule->mask);
+			values[3] = CStringGetTextDatum(buffer);
 		} else {
 			nulls[3] = TRUE;
 		}
@@ -891,4 +955,48 @@ connection_limits(PG_FUNCTION_ARGS)
 		
 	}
 
+}
+
+
+static void format_address(char * dest, int destlen, struct sockaddr * addr, struct sockaddr * mask)
+{
+	int		ret,
+			len,
+			pos = 0;
+			
+	char	buffer[256];
+
+	switch (addr->sa_family)
+	{
+		case AF_INET:
+			len = sizeof(struct sockaddr_in);
+			break;
+#ifdef HAVE_IPV6
+		case AF_INET6:
+			len = sizeof(struct sockaddr_in6);
+			break;
+#endif
+		default:
+			len = sizeof(struct sockaddr_storage);
+			break;
+	}
+
+	ret = getnameinfo(addr, len, buffer, sizeof(buffer), NULL, 0, NI_NUMERICHOST);
+	
+	if (ret != 0) {
+		elog(WARNING, "[unknown: family %d]", addr->sa_family);
+	} else {
+		strcpy(dest, buffer);
+		pos = strlen(buffer);
+		dest[pos++] = '/';
+	}
+
+	ret = getnameinfo(mask, len, buffer, sizeof(buffer), NULL, 0, NI_NUMERICHOST);
+	
+	if (ret != 0) {
+		elog(WARNING, "[unknown: family %d]", mask->sa_family);
+	} else {
+		strcpy(&dest[pos], buffer);
+	}
+	
 }
