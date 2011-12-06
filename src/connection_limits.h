@@ -102,5 +102,6 @@ typedef struct BackendInfo {
 	char		database[NAMEDATALEN];
 	char		role[NAMEDATALEN];
 	SockAddr 	socket;
+	char		hostname[NAMEDATALEN];
 
 } BackendInfo;
