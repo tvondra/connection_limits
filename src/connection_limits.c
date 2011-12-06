@@ -12,6 +12,7 @@
 
 #include "postgres.h"
 #include "port.h"
+#include "utils/guc.h"
 
 #include "access/sysattr.h"
 #include "access/twophase.h"
@@ -32,6 +33,10 @@
 #include "utils/tqual.h"
 
 #include "connection_limits.h"
+
+static int default_per_database = 0;
+static int default_per_role = 0;
+static int default_per_ip = 0;
 
 /* allocates space for the rules */
 static void pg_limits_shmem_startup(void);
@@ -62,6 +67,10 @@ static void backend_update_info(BackendInfo * info, pid_t pid, char * database, 
 
 static bool is_super_user(char * rolename);
 
+static bool rule_is_per_ip(rule_t * rule);
+static bool rule_is_per_database(rule_t * rule);
+static bool rule_is_per_user(rule_t * rule);
+
 /* Saved hook values in case of unload */
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 
@@ -88,6 +97,50 @@ _PG_init(void)
 	if (! process_shared_preload_libraries_in_progress)
 		elog(ERROR, "connection_limits_shared has to be loaded using "
 					"shared_preload_libraries");
+    
+    DefineCustomIntVariable("connection_limits.per_database",
+                         "Default number of connections per database.",
+                         "Zero disables this check.",
+                            &default_per_database,
+                            0,
+                            0, MaxBackends,
+                            PGC_POSTMASTER,
+                            0,
+#if (PG_VERSION_NUM >= 90100)
+                            NULL,
+#endif
+                            NULL,
+                            NULL);
+    
+    DefineCustomIntVariable("connection_limits.per_user",
+                         "Default number of connections per user.",
+                         "Zero disables this check.",
+                            &default_per_role,
+                            0,
+                            0, MaxBackends,
+                            PGC_POSTMASTER,
+                            0,
+#if (PG_VERSION_NUM >= 90100)
+                            NULL,
+#endif
+                            NULL,
+                            NULL);
+    
+    DefineCustomIntVariable("connection_limits.per_ip",
+                         "Default number of connections per IP.",
+                         "Zero disables this check.",
+                            &default_per_ip,
+                            0,
+                            0, MaxBackends,
+                            PGC_POSTMASTER,
+                            0,
+#if (PG_VERSION_NUM >= 90100)
+                            NULL,
+#endif
+                            NULL,
+                            NULL);
+	
+	EmitWarningsOnPlaceholders("connection_limits");
 	
 	/*
 	 * Request additional shared resources.  (These are no-ops if we're not in
@@ -397,8 +450,18 @@ void check_rules(Port *port, int status)
 	 */
 	if (status == STATUS_OK)
 	{
-		
+		/* index of the process */
 		int			index;
+		
+		/* limits */
+		bool		per_user_overriden = false,
+					per_database_overriden = false,
+					per_ip_overriden = false;
+		
+		/* counters */
+		int			per_user = 0,
+					per_database = 0,
+					per_ip = 0;
 		
 		elog(WARNING, "rule check start");
 
@@ -427,42 +490,88 @@ void check_rules(Port *port, int status)
 										port->database_name, port->user_name, port->raddr);
 				}
 				
-				/* check all the rules for this backend */
-				for (r = 0; r < rules->n_rules; r++) {
+				/* do this only if the backend is valid */
+				if (backend_info_is_valid(backends[proc->backendId], proc->pid)) {
 					
-					/* the rule has to matche both the backend and the current session
-					 * at the same time */
-					if (rule_matches(rules->rules[r], port->database_name, port->user_name, port->raddr)) {
-						
-						/* check the rule for a backend - if the PID is different, the backend is
-						 * waiting on the lock (and will be processed soon) */
-						if (backend_info_is_valid(backends[proc->backendId], proc->pid) &&
-							(rule_matches(rules->rules[r], backends[proc->backendId].database,
-										  backends[proc->backendId].role, backends[proc->backendId].socket))) {
-									
-							/* increment the count */
-							++rules->rules[r].count;
-						
-							/* the current backend is not if pg_stat_backends yet, so equality
-							* actually means the limit was crossed */
-							if (rules->rules[r].count > rules->rules[r].limit) {
-								
-								if (! is_super_user(port->user_name)) {
-									elog(ERROR, "connection limit reached (rule %d, line %d, limit %d)",
-												r, rules->rules[r].line, rules->rules[r].limit);
-								} else {
-									elog(WARNING, "connection limit reached (rule %d, line %d, limit %d), but the user is a superuser",
-												r, rules->rules[r].line, rules->rules[r].limit);
-								}
-								
-							} /* limit reached */
-							
-						} /* rule_matches(record from pg_stat_activity) */
-						
-					} /* rule_matches(this backend) */
-					
-				} /* for (r = 0; r < rules->n_rules; r++) */
+					/* increment per_database, per_user and per_ip counters */
+					per_database += (strcmp(backends[proc->backendId].database, port->database_name) == 0) ? 1 : 0;
+					per_user     += (strcmp(backends[proc->backendId].role, port->user_name) == 0) ? 1 : 0;
+					per_database += (memcmp(&backends[proc->backendId].socket, &port->raddr, sizeof(SockAddr)) == 0) ? 1 : 0;
 				
+					/* check all the rules for this backend */
+					for (r = 0; r < rules->n_rules; r++) {
+						
+						/* the rule has to matche both the backend and the current session
+						* at the same time */
+						if (rule_matches(rules->rules[r], port->database_name, port->user_name, port->raddr)) {
+							
+							/* check if this rule overrides per-db, per-user or per-ip limits */
+							per_database_overriden = per_database_overriden || rule_is_per_database(&rules->rules[r]);
+							per_user_overriden     = per_user_overriden || rule_is_per_user(&rules->rules[r]);
+							per_ip_overriden       = per_ip_overriden || rule_is_per_ip(&rules->rules[r]);
+							
+							/* check the rule for a backend - if the PID is different, the backend is
+							* waiting on the lock (and will be processed soon) */
+							if (rule_matches(rules->rules[r], backends[proc->backendId].database,
+											backends[proc->backendId].role, backends[proc->backendId].socket)) {
+										
+								/* increment the count */
+								++rules->rules[r].count;
+							
+								/* the current backend is not if pg_stat_backends yet, so equality
+								* actually means the limit was crossed */
+								if (rules->rules[r].count > rules->rules[r].limit) {
+									
+									if (! is_super_user(port->user_name)) {
+										elog(ERROR, "connection limit reached (rule %d, line %d, limit %d)",
+													r, rules->rules[r].line, rules->rules[r].limit);
+									} else {
+										elog(WARNING, "connection limit reached (rule %d, line %d, limit %d), but the user is a superuser",
+													r, rules->rules[r].line, rules->rules[r].limit);
+									}
+									
+								} /* limit reached */
+								
+							} /* rule_matches(record from pg_stat_activity) */
+							
+						} /* rule_matches(this backend) */
+						
+					} /* for (r = 0; r < rules->n_rules; r++) */
+					
+				} /* if (backend_is_valid(...)) */
+			}
+		}
+		
+		/* check per-database limit */
+		if ((! per_database_overriden) && (default_per_database != 0) && (per_database > default_per_database)) {
+			if (! is_super_user(port->user_name)) {
+				elog(ERROR, "per-database connection limit reached (limit %d)",
+					 default_per_database);
+			} else {
+				elog(WARNING, "per-database  limit reached (limit %d), but the user is a superuser",
+					 default_per_database);
+			}
+		}
+		
+		/* check per-user limit */
+		if ((! per_user_overriden) && (default_per_role != 0) && (per_user > default_per_role)) {
+			if (! is_super_user(port->user_name)) {
+				elog(ERROR, "per-user connection limit reached (limit %d)",
+					 default_per_role);
+			} else {
+				elog(WARNING, "per-user connection limit reached (limit %d), but the user is a superuser",
+					 default_per_role);
+			}
+		}
+		
+		/* check per-IP limit */
+		if ((! per_ip_overriden) && (default_per_ip != 0) && (per_ip > default_per_ip)) {
+			if (! is_super_user(port->user_name)) {
+				elog(ERROR, "per-IP connection limit reached (limit %d)",
+					 default_per_ip);
+			} else {
+				elog(WARNING, "per-IP connection limit reached (limit %d), but the user is a superuser",
+					 default_per_ip);
 			}
 		}
 
@@ -648,4 +757,19 @@ bool is_super_user(char * rolename) {
 
 	return (roleform->rolsuper);
 
+}
+
+static
+bool rule_is_per_user(rule_t * rule) {
+	return (rule->fields == CHECK_USER);
+}
+
+static
+bool rule_is_per_database(rule_t * rule) {
+	return (rule->fields == CHECK_DBNAME);
+}
+
+static
+bool rule_is_per_ip(rule_t * rule) {
+	return (rule->fields == CHECK_IP);
 }
