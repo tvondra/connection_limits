@@ -222,7 +222,7 @@ int number_of_rules() {
 	
 	FILE   *file;
 	char	line[LINE_MAXLEN];
-	char	dbname[NAMEDATALEN], user[NAMEDATALEN], ip[NAMEDATALEN];
+	char	dbname[NAMEDATALEN], user[NAMEDATALEN], mask[NAMEDATALEN], ip[NAMEDATALEN];
 	int	 limit;
 	int	 n = 0;
 
@@ -238,8 +238,9 @@ int number_of_rules() {
 	}
 	
 	while (fgets(line, LINE_MAXLEN, file) != NULL) {
-		// FIXME handle empty lines and lines with separate netmask
 		if (sscanf(line, "%s %s %s %d", dbname, user, ip, &limit) == 4) {
+			n++;
+		} else if (sscanf(line, "%s %s %s %s %d", dbname, user, ip, mask, &limit) == 5) {
 			n++;
 		}
 	}
