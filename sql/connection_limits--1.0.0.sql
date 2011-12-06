@@ -2,3 +2,5 @@ CREATE OR REPLACE FUNCTION connection_limits(OUT line INT, OUT database VARCHAR,
     RETURNS SETOF record
     AS 'MODULE_PATHNAME', 'connection_limits'
     LANGUAGE C IMMUTABLE;
+
+CREATE VIEW connection_limits AS SELECT * FROM connection_limits();
