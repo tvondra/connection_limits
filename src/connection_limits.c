@@ -37,10 +37,10 @@
 static void pg_limits_shmem_startup(void);
 
 /* check the rules (using pg_stat_activity) */
-static void rules_check(Port *port, int status);
+static void check_rules(Port *port, int status);
 
 /* resets the counters to 0 */
-static void rules_reset(void);
+static void reset_rules(void);
 
 /* check that a particular rule matches the database name / username */
 static bool rule_matches(rule_t rule, const char * dbname, const char * username, SockAddr ip);
@@ -57,7 +57,7 @@ static bool check_ip(SockAddr *raddr, struct sockaddr * addr, struct sockaddr * 
 
 static bool attach_procarray(void);
 
-static bool backend_is_valid(BackendInfo info, pid_t pid);
+static bool backend_info_is_valid(BackendInfo info, pid_t pid);
 static void backend_update_info(BackendInfo * info, pid_t pid, char * database, char * role, SockAddr socket);
 
 static bool is_super_user(char * rolename);
@@ -103,7 +103,7 @@ _PG_init(void)
 	
 	/* Install Hooks */
 	prev_client_auth_hook = ClientAuthentication_hook;
-	ClientAuthentication_hook = rules_check;
+	ClientAuthentication_hook = check_rules;
 
 }
 
@@ -169,7 +169,7 @@ int number_of_rules() {
 	
 	FILE   *file;
 	char	line[LINE_MAXLEN];
-	char	dbname[NAME_MAXLEN], user[NAME_MAXLEN], ip[NAME_MAXLEN];
+	char	dbname[NAMEDATALEN], user[NAMEDATALEN], ip[NAMEDATALEN];
 	int	 limit;
 	int	 n = 0;
 
@@ -184,7 +184,8 @@ int number_of_rules() {
 		return 0;
 	}
 	
-	while (fgets(line, 256, file) != NULL) {
+	while (fgets(line, LINE_MAXLEN, file) != NULL) {
+		// FIXME handle empty lines and lines with separate netmask
 		if (sscanf(line, "%s %s %s %d", dbname, user, ip, &limit) == 4) {
 			n++;
 		}
@@ -201,7 +202,7 @@ void load_rules(void) {
 	
 	FILE   *file;
 	char	line[LINE_MAXLEN];
-	char	dbname[NAME_MAXLEN], user[NAME_MAXLEN], ip[NAME_MAXLEN], mask[NAME_MAXLEN];
+	char	dbname[NAMEDATALEN], user[NAMEDATALEN], ip[NAMEDATALEN], mask[NAMEDATALEN];
 	int		limit;
 	int		line_number = 0;
 	
@@ -216,7 +217,7 @@ void load_rules(void) {
 		return;
 	}
 	
-	while (fgets(line, 256, file) != NULL) {
+	while (fgets(line, LINE_MAXLEN, file) != NULL) {
 
 		/* remove comment from the line */
 		char * comment = strchr(line, '#');
@@ -380,7 +381,7 @@ bool load_rule(int line, const char * dbname, const char * user, const char * ip
 }
 
 static
-void rules_check(Port *port, int status)
+void check_rules(Port *port, int status)
 {
 
 	int r;
@@ -405,7 +406,7 @@ void rules_check(Port *port, int status)
 		LWLockAcquire(ProcArrayLock, LW_SHARED);
 
 		/* reset the rules */
-		rules_reset();
+		reset_rules();
 		
 		/* attach the shared segment */
 		attach_procarray();
@@ -435,7 +436,7 @@ void rules_check(Port *port, int status)
 						
 						/* check the rule for a backend - if the PID is different, the backend is
 						 * waiting on the lock (and will be processed soon) */
-						if (backend_is_valid(backends[proc->backendId], proc->pid) &&
+						if (backend_info_is_valid(backends[proc->backendId], proc->pid) &&
 							(rule_matches(rules->rules[r], backends[proc->backendId].database,
 										  backends[proc->backendId].role, backends[proc->backendId].socket))) {
 									
@@ -497,7 +498,7 @@ bool rule_matches(rule_t rule, const char * dbname, const char * user, SockAddr 
 }
 
 static
-void rules_reset() {
+void reset_rules() {
 	int i;
 	for (i = 0; i < rules->n_rules; i++) {
 		rules->rules[i].count = 0;
@@ -575,6 +576,8 @@ bool attach_procarray() {
 
 }
 
+/* 
+ */
 static void backend_update_info(BackendInfo * info, pid_t pid, char * database, char * role, SockAddr socket) {
 	
 	info->pid = pid;
@@ -584,7 +587,7 @@ static void backend_update_info(BackendInfo * info, pid_t pid, char * database, 
 	
 }
 
-static bool backend_is_valid(BackendInfo info, pid_t pid) {
+static bool backend_info_is_valid(BackendInfo info, pid_t pid) {
 	return (info.pid == pid);
 }
 

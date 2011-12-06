@@ -6,6 +6,8 @@
 #include "storage/s_lock.h"
 #include "libpq/pqcomm.h"
 
+#include "pg_config_manual.h"
+
 #define LIMITS_FILE	 "pg_limits.conf"
 #define SEGMENT_NAME	"connection_limits"
 
@@ -14,8 +16,7 @@
 #define SEGMENT_SIZE	(sizeof(rule_t) * (MAX_RULES-1) + sizeof(rules_t) + sizeof(BackendInfo) * MaxBackends)
 #define PROCARRAY_MAXPROCS	(MaxBackends + max_prepared_xacts)
 
-#define NAME_MAXLEN	 64
-#define LINE_MAXLEN	 256
+#define LINE_MAXLEN	 1024
 
 #define CHECK_DBNAME	1
 #define CHECK_USER		2
@@ -35,13 +36,13 @@ typedef struct rule_t {
 	int fields;
 	
 	/* database OID */
-	char database[NAME_MAXLEN];
+	char database[NAMEDATALEN];
 	
 	/* user name */
-	char user[NAME_MAXLEN];
+	char user[NAMEDATALEN];
 	
 	/* hostname */
-	char hostname[NAME_MAXLEN];
+	char hostname[NAMEDATALEN];
 	
 	/* IP address and mask */
 	struct sockaddr_storage ip;
@@ -98,8 +99,8 @@ typedef struct ProcArrayStruct
 typedef struct BackendInfo {
 
 	int			pid;
-	char		database[NAME_MAXLEN];
-	char		role[NAME_MAXLEN];
+	char		database[NAMEDATALEN];
+	char		role[NAMEDATALEN];
 	SockAddr 	socket;
 
 } BackendInfo;
