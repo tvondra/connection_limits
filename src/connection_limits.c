@@ -17,12 +17,16 @@
 #include "access/sysattr.h"
 #include "access/twophase.h"
 
+#include "utils/builtins.h"
+
 #include "catalog/indexing.h"
 #include "catalog/pg_authid.h"
 
 #include "commands/dbcommands.h"
 
 #include "executor/executor.h"
+
+#include "funcapi.h"
 
 #include "libpq/auth.h"
 #include "libpq/ip.h"
@@ -86,6 +90,10 @@ static ProcArrayStruct *procArray = NULL;
 void		_PG_init(void);
 void		_PG_fini(void);
 
+PG_FUNCTION_INFO_V1(connection_limits);
+
+Datum connection_limits(PG_FUNCTION_ARGS);
+
 /*
  * Module load callback
  */
@@ -97,48 +105,48 @@ _PG_init(void)
 	if (! process_shared_preload_libraries_in_progress)
 		elog(ERROR, "connection_limits_shared has to be loaded using "
 					"shared_preload_libraries");
-    
-    DefineCustomIntVariable("connection_limits.per_database",
-                         "Default number of connections per database.",
-                         "Zero disables this check.",
-                            &default_per_database,
-                            0,
-                            0, MaxBackends,
-                            PGC_POSTMASTER,
-                            0,
+	
+	DefineCustomIntVariable("connection_limits.per_database",
+						 "Default number of connections per database.",
+						 "Zero disables this check.",
+							&default_per_database,
+							0,
+							0, MaxBackends,
+							PGC_POSTMASTER,
+							0,
 #if (PG_VERSION_NUM >= 90100)
-                            NULL,
+							NULL,
 #endif
-                            NULL,
-                            NULL);
-    
-    DefineCustomIntVariable("connection_limits.per_user",
-                         "Default number of connections per user.",
-                         "Zero disables this check.",
-                            &default_per_role,
-                            0,
-                            0, MaxBackends,
-                            PGC_POSTMASTER,
-                            0,
+							NULL,
+							NULL);
+	
+	DefineCustomIntVariable("connection_limits.per_user",
+						 "Default number of connections per user.",
+						 "Zero disables this check.",
+							&default_per_role,
+							0,
+							0, MaxBackends,
+							PGC_POSTMASTER,
+							0,
 #if (PG_VERSION_NUM >= 90100)
-                            NULL,
+							NULL,
 #endif
-                            NULL,
-                            NULL);
-    
-    DefineCustomIntVariable("connection_limits.per_ip",
-                         "Default number of connections per IP.",
-                         "Zero disables this check.",
-                            &default_per_ip,
-                            0,
-                            0, MaxBackends,
-                            PGC_POSTMASTER,
-                            0,
+							NULL,
+							NULL);
+	
+	DefineCustomIntVariable("connection_limits.per_ip",
+						 "Default number of connections per IP.",
+						 "Zero disables this check.",
+							&default_per_ip,
+							0,
+							0, MaxBackends,
+							PGC_POSTMASTER,
+							0,
 #if (PG_VERSION_NUM >= 90100)
-                            NULL,
+							NULL,
 #endif
-                            NULL,
-                            NULL);
+							NULL,
+							NULL);
 	
 	EmitWarningsOnPlaceholders("connection_limits");
 	
@@ -496,7 +504,7 @@ void check_rules(Port *port, int status)
 					
 					/* increment per_database, per_user and per_ip counters */
 					per_database += (strcmp(backends[proc->backendId].database, port->database_name) == 0) ? 1 : 0;
-					per_user     += (strcmp(backends[proc->backendId].role, port->user_name) == 0) ? 1 : 0;
+					per_user	 += (strcmp(backends[proc->backendId].role, port->user_name) == 0) ? 1 : 0;
 					per_database += (memcmp(&backends[proc->backendId].socket, &port->raddr, sizeof(SockAddr)) == 0) ? 1 : 0;
 				
 					/* check all the rules for this backend */
@@ -508,8 +516,8 @@ void check_rules(Port *port, int status)
 							
 							/* check if this rule overrides per-db, per-user or per-ip limits */
 							per_database_overriden = per_database_overriden || rule_is_per_database(&rules->rules[r]);
-							per_user_overriden     = per_user_overriden || rule_is_per_user(&rules->rules[r]);
-							per_ip_overriden       = per_ip_overriden || rule_is_per_ip(&rules->rules[r]);
+							per_user_overriden	 = per_user_overriden || rule_is_per_user(&rules->rules[r]);
+							per_ip_overriden	   = per_ip_overriden || rule_is_per_ip(&rules->rules[r]);
 							
 							/* check the rule for a backend - if the PID is different, the backend is
 							* waiting on the lock (and will be processed soon) */
@@ -773,4 +781,114 @@ bool rule_is_per_database(rule_t * rule) {
 static
 bool rule_is_per_ip(rule_t * rule) {
 	return (rule->fields == CHECK_IP);
+}
+
+
+Datum
+connection_limits(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *funcctx;
+	TupleDesc	   tupdesc;
+	AttInMetadata   *attinmeta;
+
+	/* init on the first call */
+	if (SRF_IS_FIRSTCALL()) {
+		
+		MemoryContext oldcontext;
+		
+		funcctx = SRF_FIRSTCALL_INIT();
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
+		
+		/* number of rules */
+		funcctx->max_calls = rules->n_rules;
+		
+		/* Build a tuple descriptor for our result type */
+		if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("function returning record called in context "
+							"that cannot accept type record")));
+
+		/*
+		 * generate attribute metadata needed later to produce tuples from raw
+		 * C strings
+		 */
+		attinmeta = TupleDescGetAttInMetadata(tupdesc);
+		funcctx->attinmeta = attinmeta;
+		funcctx->tuple_desc = tupdesc;
+		
+		/* switch back to the old context */
+		MemoryContextSwitchTo(oldcontext);
+		
+	}
+	
+	/* init the context */
+	funcctx = SRF_PERCALL_SETUP();
+	
+	/* check if we have more data */
+	if (funcctx->max_calls > funcctx->call_cntr)
+	{
+		HeapTuple	   tuple;
+		Datum		   result;
+		Datum		   values[6];
+		bool			nulls[6];
+		
+		rule_t * rule = &(rules->rules[funcctx->call_cntr]);
+		
+		memset(nulls, 0, sizeof(nulls));
+		
+		/* rule line */
+		values[0] = UInt32GetDatum(rule->line);
+		
+		/* database */
+		if (rule->fields & CHECK_DBNAME) {
+			values[1] = CStringGetTextDatum(rule->database);
+		} else {
+			nulls[1] = TRUE;
+		}
+		
+		/* username */
+		if (rule->fields & CHECK_USER) {
+			values[2] = CStringGetTextDatum(rule->user);
+		} else {
+			nulls[2] = TRUE;
+		}
+		
+		/* hostname or IP address */
+		if (rule->fields & CHECK_HOST) {
+			/* FIXME proper INET output */
+			values[3] = CStringGetTextDatum(rule->hostname);
+		} else if (rule->fields & CHECK_IP) {
+			/* FIXME proper INET output */
+			values[3] = CStringGetTextDatum("\0");
+		} else {
+			nulls[3] = TRUE;
+		}
+		
+		/* count and limit */
+		values[4] = UInt32GetDatum(rule->count);
+		values[5] = UInt32GetDatum(rule->limit);
+		
+		/* Build and return the tuple. */
+		tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
+		
+		/* make the tuple into a datum */
+		result = HeapTupleGetDatum(tuple);
+
+		/* Here we want to return another item: */
+		SRF_RETURN_NEXT(funcctx, result);
+		
+	}
+	else
+	{
+		/* lock ProcArray (serialize the processes) */
+		LWLockRelease(ProcArrayLock);
+		
+		/* Here we are done returning items and just need to clean up: */
+		SRF_RETURN_DONE(funcctx);
+		
+	}
+
 }

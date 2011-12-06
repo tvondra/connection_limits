@@ -3,4 +3,4 @@ comment = 'Allows recording of SQL queries to a separate file.'
 default_version = '1.0.0'
 relocatable = true
 
-module_pathname = '$libdir/query_recorder'
+module_pathname = '$libdir/connection_limits'
