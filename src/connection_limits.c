@@ -475,7 +475,7 @@ void check_rules(Port *port, int status)
 		elog(WARNING, "rule check start");
 
 		/* lock ProcArray (serialize the processes) */
-		LWLockAcquire(ProcArrayLock, LW_SHARED);
+		LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
 
 		/* reset the rules */
 		reset_rules();
