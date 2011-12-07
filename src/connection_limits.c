@@ -443,7 +443,10 @@ bool load_rule(int line, const char * dbname, const char * user, const char * ip
 	} /* IP address parsing */
 	
 	/* successfully parsed - at least one field needs to be set (increment) */
-	if (rule->fields != 0) {
+	if (rule->fields == 0) {
+		elog(WARNING, "rule on line %d is invalid - no value set", line);
+		return false;
+	} else {
 		rules->n_rules += 1;
 	}
 	
