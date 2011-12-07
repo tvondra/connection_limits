@@ -53,7 +53,8 @@ static void check_all_rules(void);
 static void reset_rules(void);
 
 /* check that a particular rule matches the database name / username */
-static bool rule_matches(rule_t rule, const char * dbname, const char * username, SockAddr ip, char * hostname);
+static bool rule_matches(rule_t rule, const char * dbname, const char * username,
+			 SockAddr ip, char * hostname);
 
 /* count rules in the config file */
 static int number_of_rules(void);
@@ -61,14 +62,16 @@ static int number_of_rules(void);
 /* load rules from the file */
 static void load_rules(void);
 
-static bool load_rule(int line, const char * dbname, const char * user, const char * ip, const char * mask, int limit);
+static bool load_rule(int line, const char * dbname, const char * user,
+		      const char * ip, const char * mask, int limit);
 
 static bool check_ip(SockAddr *raddr, struct sockaddr * addr, struct sockaddr * mask);
 
 static bool attach_procarray(void);
 
 static bool backend_info_is_valid(BackendInfo info, pid_t pid);
-static void backend_update_info(BackendInfo * info, pid_t pid, char * database, char * role, SockAddr socket, char * hostname);
+static void backend_update_info(BackendInfo * info, pid_t pid, char * database,
+				char * role, SockAddr socket, char * hostname);
 
 static bool is_super_user(char * rolename);
 
@@ -76,7 +79,8 @@ static bool rule_is_per_ip(rule_t * rule);
 static bool rule_is_per_database(rule_t * rule);
 static bool rule_is_per_user(rule_t * rule);
 
-static void format_address(char * dest, int destlen, struct sockaddr * addr, struct sockaddr * mask);
+static void format_address(char * dest, int destlen, struct sockaddr * addr,
+			   struct sockaddr * mask);
 
 /* Saved hook values in case of unload */
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
@@ -107,49 +111,49 @@ _PG_init(void)
 	/* can be preloaded only from postgresql.conf */
 	if (! process_shared_preload_libraries_in_progress)
 		elog(ERROR, "connection_limits_shared has to be loaded using "
-					"shared_preload_libraries");
+			    "shared_preload_libraries");
 	
 	DefineCustomIntVariable("connection_limits.per_database",
-						 "Default number of connections per database.",
-						 "Zero disables this check.",
-							&default_per_database,
-							0,
-							0, MaxBackends,
-							PGC_POSTMASTER,
-							0,
+				"Default number of connections per database.",
+				"Zero disables this check.",
+				&default_per_database,
+				0,
+				0, MaxBackends,
+				PGC_POSTMASTER,
+				0,
 #if (PG_VERSION_NUM >= 90100)
-							NULL,
+				NULL,
 #endif
-							NULL,
-							NULL);
+				NULL,
+				NULL);
 	
 	DefineCustomIntVariable("connection_limits.per_user",
-						 "Default number of connections per user.",
-						 "Zero disables this check.",
-							&default_per_role,
-							0,
-							0, MaxBackends,
-							PGC_POSTMASTER,
-							0,
+				"Default number of connections per user.",
+				"Zero disables this check.",
+				&default_per_role,
+				0,
+				0, MaxBackends,
+				PGC_POSTMASTER,
+				0,
 #if (PG_VERSION_NUM >= 90100)
-							NULL,
+				NULL,
 #endif
-							NULL,
-							NULL);
+				NULL,
+				NULL);
 	
 	DefineCustomIntVariable("connection_limits.per_ip",
-						 "Default number of connections per IP.",
-						 "Zero disables this check.",
-							&default_per_ip,
-							0,
-							0, MaxBackends,
-							PGC_POSTMASTER,
-							0,
+				"Default number of connections per IP.",
+				"Zero disables this check.",
+				&default_per_ip,
+				0,
+				0, MaxBackends,
+				PGC_POSTMASTER,
+				0,
 #if (PG_VERSION_NUM >= 90100)
-							NULL,
+				NULL,
 #endif
-							NULL,
-							NULL);
+				NULL,
+				NULL);
 	
 	EmitWarningsOnPlaceholders("connection_limits");
 	
@@ -312,12 +316,13 @@ void load_rules(void) {
 
 	FreeFile(file);
 	
-	elog(WARNING, "loaded %d connection limit rule(s)", rules->n_rules);
+	elog(NOTICE, "loaded %d connection limit rule(s)", rules->n_rules);
 
 }
 
 static
-bool load_rule(int line, const char * dbname, const char * user, const char * ip, const char * mask, int limit)
+bool load_rule(int line, const char * dbname, const char * user, const char * ip,
+	       const char * mask, int limit)
 {
 	/* get next rule */
 	rule_t * rule = &(rules->rules[rules->n_rules]);
@@ -473,8 +478,6 @@ void check_rules(Port *port, int status)
 		int			per_user = 0,
 					per_database = 0,
 					per_ip = 0;
-		
-		elog(WARNING, "rule check start");
 
 		/* lock ProcArray (serialize the processes) */
 		LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
@@ -498,8 +501,7 @@ void check_rules(Port *port, int status)
 				/* if this is the backend, then update the local info */
 				if (proc->backendId == MyBackendId) {
 					backend_update_info(&backends[proc->backendId], proc->pid,
-										port->database_name, port->user_name, port->raddr,
-										port->remote_hostname);
+								port->database_name, port->user_name, port->raddr, port->remote_hostname);
 				}
 				
 				/* do this only if the backend is valid */
@@ -507,7 +509,7 @@ void check_rules(Port *port, int status)
 					
 					/* increment per_database, per_user and per_ip counters */
 					per_database += (strcmp(backends[proc->backendId].database, port->database_name) == 0) ? 1 : 0;
-					per_user	 += (strcmp(backends[proc->backendId].role, port->user_name) == 0) ? 1 : 0;
+					per_user     += (strcmp(backends[proc->backendId].role, port->user_name) == 0) ? 1 : 0;
 					per_database += (memcmp(&backends[proc->backendId].socket, &port->raddr, sizeof(SockAddr)) == 0) ? 1 : 0;
 				
 					/* check all the rules for this backend */
@@ -519,14 +521,14 @@ void check_rules(Port *port, int status)
 							
 							/* check if this rule overrides per-db, per-user or per-ip limits */
 							per_database_overriden = per_database_overriden || rule_is_per_database(&rules->rules[r]);
-							per_user_overriden	 = per_user_overriden || rule_is_per_user(&rules->rules[r]);
-							per_ip_overriden	   = per_ip_overriden || rule_is_per_ip(&rules->rules[r]);
+							per_user_overriden     = per_user_overriden || rule_is_per_user(&rules->rules[r]);
+							per_ip_overriden       = per_ip_overriden || rule_is_per_ip(&rules->rules[r]);
 							
 							/* check the rule for a backend - if the PID is different, the backend is
 							* waiting on the lock (and will be processed soon) */
 							if (rule_matches(rules->rules[r], backends[proc->backendId].database,
-											backends[proc->backendId].role, backends[proc->backendId].socket,
-											backends[proc->backendId].hostname)) {
+										backends[proc->backendId].role, backends[proc->backendId].socket,
+										backends[proc->backendId].hostname)) {
 										
 								/* increment the count */
 								++rules->rules[r].count;
@@ -683,42 +685,42 @@ void reset_rules() {
 static bool
 check_ip(SockAddr *raddr, struct sockaddr * addr, struct sockaddr * mask)
 {
-		if (raddr->addr.ss_family == addr->sa_family)
-		{
-				/* Same address family */
-				if (!pg_range_sockaddr(&raddr->addr,
-														   (struct sockaddr_storage *) addr,
-														   (struct sockaddr_storage *) mask))
-						return false;
-		}
+	if (raddr->addr.ss_family == addr->sa_family)
+	{
+		/* Same address family */
+		if (!pg_range_sockaddr(&raddr->addr,
+					   (struct sockaddr_storage *) addr,
+					   (struct sockaddr_storage *) mask))
+			return false;
+	}
 #ifdef HAVE_IPV6
-		else if (addr->sa_family == AF_INET &&
-						 raddr->addr.ss_family == AF_INET6)
-		{
-				/*
-				 * If we're connected on IPv6 but the file specifies an IPv4 address
-				 * to match against, promote the latter to an IPv6 address before
-				 * trying to match the client's address.
-				 */
-				struct sockaddr_storage addrcopy,
-										maskcopy;
+	else if (addr->sa_family == AF_INET &&
+			 raddr->addr.ss_family == AF_INET6)
+	{
+		/*
+		 * If we're connected on IPv6 but the file specifies an IPv4 address
+		 * to match against, promote the latter to an IPv6 address before
+		 * trying to match the client's address.
+		 */
+		struct sockaddr_storage addrcopy,
+					maskcopy;
 
-				memcpy(&addrcopy, &addr, sizeof(addrcopy));
-				memcpy(&maskcopy, &mask, sizeof(maskcopy));
-				pg_promote_v4_to_v6_addr(&addrcopy);
-				pg_promote_v4_to_v6_mask(&maskcopy);
+		memcpy(&addrcopy, &addr, sizeof(addrcopy));
+		memcpy(&maskcopy, &mask, sizeof(maskcopy));
+		pg_promote_v4_to_v6_addr(&addrcopy);
+		pg_promote_v4_to_v6_mask(&maskcopy);
 
-				if (!pg_range_sockaddr(&raddr->addr, &addrcopy, &maskcopy))
-						return false;
-		}
+		if (!pg_range_sockaddr(&raddr->addr, &addrcopy, &maskcopy))
+			return false;
+	}
 #endif   /* HAVE_IPV6 */
-		else
-		{
-				/* Wrong address family, no IPV6 */
-				return false;
-		}
+	else
+	{
+		/* Wrong address family, no IPV6 */
+		return false;
+	}
 
-		return true;
+	return true;
 }
 
 static
