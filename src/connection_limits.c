@@ -78,6 +78,13 @@ static bool rule_is_per_user(rule_t * rule);
 
 static void format_address(char * dest, int destlen, struct sockaddr * addr, struct sockaddr * mask);
 
+static bool hostname_match(const char *pattern, const char *actual_hostname);
+
+static bool ipv4eq(struct sockaddr_in * a, struct sockaddr_in * b);
+#ifdef HAVE_IPV6
+static bool ipv6eq(struct sockaddr_in6 * a, struct sockaddr_in6 * b);
+#endif   /* HAVE_IPV6 */
+
 /* Saved hook values in case of unload */
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 
@@ -473,8 +480,6 @@ void check_rules(Port *port, int status)
 		int			per_user = 0,
 					per_database = 0,
 					per_ip = 0;
-		
-		elog(WARNING, "rule check start");
 
 		/* lock ProcArray (serialize the processes) */
 		LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
@@ -497,9 +502,26 @@ void check_rules(Port *port, int status)
 				
 				/* if this is the backend, then update the local info */
 				if (proc->backendId == MyBackendId) {
+					
+					/* Lookup remote host name if not already done */
+					if (! port->remote_hostname) {
+						
+						char	remote_hostname[NI_MAXHOST];
+						
+						if (! pg_getnameinfo_all(&port->raddr.addr, port->raddr.salen,
+											remote_hostname, sizeof(remote_hostname),
+											NULL, 0,
+											0)) {
+							
+							port->remote_hostname = pstrdup(remote_hostname);
+						}
+						
+					}
+					
 					backend_update_info(&backends[proc->backendId], proc->pid,
 										port->database_name, port->user_name, port->raddr,
 										port->remote_hostname);
+					
 				}
 				
 				/* do this only if the backend is valid */
@@ -618,6 +640,8 @@ void check_all_rules(void)
 				/* check all the rules for this backend */
 				for (r = 0; r < rules->n_rules; r++) {
 					
+					/* FIXME This should probably refresh the hostname (using pg_getnameinfo_all) */
+					
 					/* check the rule for a backend - if the PID is different, the backend is
 					* waiting on the lock (and will be processed soon) */
 					if (rule_matches(rules->rules[r], backends[proc->backendId].database,
@@ -652,7 +676,6 @@ bool rule_matches(rule_t rule, const char * dbname, const char * user, SockAddr 
 	}
 	
 	/* check the IP address (mask etc.) */
-	/* FIXME This needs to check the hostname somehow. */
 	if (rule.fields & CHECK_IP) {
 		
 		if (! check_ip(&ip, (struct sockaddr *)&rule.ip, (struct sockaddr *)&rule.mask)) {
@@ -660,7 +683,59 @@ bool rule_matches(rule_t rule, const char * dbname, const char * user, SockAddr 
 		}
 		
 	} else if ((rule.fields & CHECK_HOST) && (strcmp(rule.hostname, hostname) != 0)) {
-		return false;
+		
+		/* was the reverse lookup successfull? */
+		if (hostname && (! hostname_match(rule.hostname, hostname))) {
+			return false;
+		} else {
+			
+			bool found = false;
+			struct addrinfo *gai_result, *gai;
+			
+			int ret = getaddrinfo(rule.hostname, NULL, NULL, &gai_result);
+			
+			if (ret != 0) {
+				ereport(WARNING,
+						(errmsg("could not translate host name \"%s\" to address: %s",
+								rule.hostname, gai_strerror(ret))));
+			}
+
+			for (gai = gai_result; gai; gai = gai->ai_next)
+			{
+				if (gai->ai_addr->sa_family == ip.addr.ss_family)
+				{
+					if (gai->ai_addr->sa_family == AF_INET)
+					{
+						if (ipv4eq((struct sockaddr_in *) gai->ai_addr,
+								(struct sockaddr_in *) & ip.addr))
+						{
+							found = true;
+							break;
+						}
+					}
+		#ifdef HAVE_IPV6
+					else if (gai->ai_addr->sa_family == AF_INET6)
+					{
+						if (ipv6eq((struct sockaddr_in6 *) gai->ai_addr,
+								(struct sockaddr_in6 *) & ip.addr))
+						{
+							found = true;
+							break;
+						}
+					}
+		#endif
+				}
+			}
+
+			if (gai_result)
+				freeaddrinfo(gai_result);
+
+			if (! found) {
+				elog(WARNING, "pg_hba.conf host name \"%s\" rejected because address resolution did not return a match with IP address of client",
+					rule.hostname);
+				return false;
+			}
+		}
 	}
 
 	
@@ -1000,3 +1075,47 @@ static void format_address(char * dest, int destlen, struct sockaddr * addr, str
 	}
 	
 }
+
+
+/*
+ * Check whether host name matches pattern.
+ */
+static bool
+hostname_match(const char *pattern, const char *actual_hostname)
+{
+	if (pattern[0] == '.')		/* suffix match */
+	{
+		size_t		plen = strlen(pattern);
+		size_t		hlen = strlen(actual_hostname);
+
+		if (hlen < plen)
+			return false;
+
+		return (pg_strcasecmp(pattern, actual_hostname + (hlen - plen)) == 0);
+	}
+	else
+		return (pg_strcasecmp(pattern, actual_hostname) == 0);
+}
+
+
+
+static bool
+ipv4eq(struct sockaddr_in * a, struct sockaddr_in * b)
+{
+	return (a->sin_addr.s_addr == b->sin_addr.s_addr);
+}
+
+#ifdef HAVE_IPV6
+
+static bool
+ipv6eq(struct sockaddr_in6 * a, struct sockaddr_in6 * b)
+{
+	int			i;
+
+	for (i = 0; i < 16; i++)
+		if (a->sin6_addr.s6_addr[i] != b->sin6_addr.s6_addr[i])
+			return false;
+
+	return true;
+}
+#endif   /* HAVE_IPV6 */
