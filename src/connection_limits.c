@@ -502,9 +502,13 @@ void check_rules(Port *port, int status)
 		
 		for (index = 0; index < procArray->numProcs; index++)
 		{
-		
+
+#if (PG_VERSION_NUM <= 90200)
 			volatile PGPROC *proc = procArray->procs[index];
-			
+#else
+			volatile PGPROC *proc = &ProcGlobal->allProcs[procArray->procs[index]];
+#endif
+
 			if (proc->pid == 0) {
 				/* do not count prepared xacts */
 				continue;
@@ -636,7 +640,11 @@ void check_all_rules(void)
 	for (index = 0; index < procArray->numProcs; index++)
 	{
 
-		volatile PGPROC *proc = procArray->procs[index];
+#if (PG_VERSION_NUM <= 90200)
+			volatile PGPROC *proc = procArray->procs[index];
+#else
+			volatile PGPROC *proc = &ProcGlobal->allProcs[procArray->procs[index]];
+#endif
 
 		if (proc->pid == 0) {
 			/* do not count prepared xacts */
@@ -817,11 +825,11 @@ bool attach_procarray() {
 
 	/* Create or attach to the ProcArray shared structure */
 	procArray = (ProcArrayStruct *)
-		ShmemInitStruct("Proc Array",
-						add_size(offsetof(ProcArrayStruct, procs),
-								 mul_size(sizeof(PGPROC *),
-										  PROCARRAY_MAXPROCS)),
-						&found);
+                ShmemInitStruct("Proc Array",
+                                                add_size(offsetof(ProcArrayStruct, procs),
+                                                                 mul_size(sizeof(int),
+                                                                                  PROCARRAY_MAXPROCS)),
+                                                &found);
 	if (! found) {
 		elog(ERROR, "the Proc Array shared segment was not found");
 		return false;

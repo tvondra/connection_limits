@@ -92,7 +92,11 @@ typedef struct ProcArrayStruct
 	 * We declare procs[] as 1 entry because C wants a fixed-size array, but
 	 * actually it is maxProcs entries long.
 	 */
+#if (PG_VERSION_NUM <= 90200)
 	PGPROC	   *procs[1];		/* VARIABLE LENGTH ARRAY */
+#else
+	int			procs[1];		/* VARIABLE LENGTH ARRAY */
+#endif
 	
 } ProcArrayStruct;
 
