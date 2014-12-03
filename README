@@ -37,7 +37,7 @@ For example by this
 
   connection_limits.per_user = 5
 
-all users (except superusers - see above) will bee allowed to open at
+all users (except superusers - see above) will be allowed to open at
 most 5 connections at the same time. The same holds for databases
 and IPs.
 
