@@ -38,6 +38,13 @@
 
 #include "connection_limits.h"
 
+#if (PG_VERSION_NUM >= 90400)
+#include "access/htup_details.h"
+#define SNAPSHOT NULL
+#else
+#define SNAPSHOT SnapshotNow
+#endif
+
 static int default_per_database = 0;
 static int default_per_role = 0;
 static int default_per_ip = 0;
@@ -888,7 +895,7 @@ GetRoleTupleByName(const char * rolename)
 	relation = heap_open(AuthIdRelationId, AccessShareLock);
 	scan = systable_beginscan(relation, AuthIdRolnameIndexId,
 							criticalSharedRelcachesBuilt,
-							SnapshotNow,
+							SNAPSHOT,
 							1, key);
 
 	tuple = systable_getnext(scan);
