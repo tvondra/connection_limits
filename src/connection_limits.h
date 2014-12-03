@@ -88,6 +88,13 @@ typedef struct ProcArrayStruct
 	 */
 	TransactionId lastOverflowedXid;
 
+#if (PG_VERSION_NUM >= 90400)
+	/* oldest xmin of any replication slot */
+	TransactionId replication_slot_xmin;
+	/* oldest catalog xmin of any replication slot */
+	TransactionId replication_slot_catalog_xmin;
+#endif
+
 	/*
 	 * We declare procs[] as 1 entry because C wants a fixed-size array, but
 	 * actually it is maxProcs entries long.
