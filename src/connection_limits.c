@@ -608,9 +608,7 @@ check_rules(Port *port, int status)
 			/* see if the database/user/IP matches */
 			per_database += (strcmp(backends[proc->backendId].database, port->database_name) == 0) ? 1 : 0;
 			per_user     += (strcmp(backends[proc->backendId].role, port->user_name) == 0) ? 1 : 0;
-
-			/* FIXME This check is wrong (checks socket but increments per_database). */
-			per_database += (memcmp(&backends[proc->backendId].socket, &port->raddr, sizeof(SockAddr)) == 0) ? 1 : 0;
+			per_ip       += (memcmp(&backends[proc->backendId].socket, &port->raddr, sizeof(SockAddr)) == 0) ? 1 : 0;
 
 			/* check all the rules for this backend */
 			for (r = 0; r < rules->n_rules; r++)
