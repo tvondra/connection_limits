@@ -38,8 +38,11 @@
 
 #include "connection_limits.h"
 
-#if (PG_VERSION_NUM >= 90400)
+#if (PG_VERSION_NUM >= 90300)
 #include "access/htup_details.h"
+#endif
+
+#if (PG_VERSION_NUM >= 90400)
 #define SNAPSHOT NULL
 #else
 #define SNAPSHOT SnapshotNow
