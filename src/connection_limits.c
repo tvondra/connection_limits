@@ -339,10 +339,13 @@ load_rules()
 		if (comment != NULL)
 			(*comment) = '\0';
 
-		/*
-		 * TODO Remove spaces from the end of the line (think of line with spaces
-		 *      and then '#' (and maybe a comment).
-		 */
+		/* remove all white-space chars from the end of the line */
+		comment--;
+		while (isspace(comment) && (comment >= line))
+		{
+			*comment = '\0';
+			comment--;
+		}
 
 		++line_number;
 
@@ -354,7 +357,7 @@ load_rules()
 		else if (sscanf(line, "%s %s %s %d", dbname, user, ip, &limit) == 4)
 			load_rule(line_number, dbname, user, ip, NULL, limit);
 
-		// FIXME check errors
+		/* non-empty line with invalid format */
 		else if (strlen(line) > 0)
 			elog(WARNING, "invalid rule at line %d", line_number);
 
