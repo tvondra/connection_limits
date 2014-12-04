@@ -13,7 +13,7 @@
 
 /* by default space for 1000 rules */
 #define MAX_RULES		1000
-#define SEGMENT_SIZE	(sizeof(rule_t) * (MAX_RULES-1) + sizeof(rules_t) + sizeof(BackendInfo) * MaxBackends)
+#define SEGMENT_SIZE	(offsetof(rules_t, rules) + sizeof(rule_t) * MAX_RULES + sizeof(BackendInfo) * MaxBackends)
 #define PROCARRAY_MAXPROCS	(MaxBackends + max_prepared_xacts)
 
 #define LINE_MAXLEN	 1024
@@ -28,43 +28,49 @@ PG_MODULE_MAGIC;
 #endif
 
 typedef struct rule_t {
-	
-	/* line number (for messages) */
+
+	/* line number (used for error messages) */
 	int line;
-	
+
 	/* which fields to use */
 	int fields;
-	
-	/* database OID */
+
+	/* database name */
 	char database[NAMEDATALEN];
-	
+
 	/* user name */
 	char user[NAMEDATALEN];
-	
-	/* hostname */
+
+	/* hostname (can't be used together with IP adress) */
 	char hostname[NAMEDATALEN];
-	
-	/* IP address and mask */
+
+	/* IP address and mask (can't be used together with hostname) */
 	struct sockaddr_storage ip;
 	struct sockaddr_storage mask;
 
-	/* current counter */
+	/* current counter status */
 	int count;
-	
+
 	/* max number of connections */
 	int limit;
-	
+
 } rule_t;
 
 typedef struct rules_t {
-	
+
+	/* current number of rules */
 	int n_rules;
-	
-	rule_t rules[1];
-	
+
+	/* rules (up to MAX_RULES) */
+	rule_t rules[1];	/* variable-length array */
+
 } rules_t;
 
-/* Our shared memory area */
+/* Our shared memory area (copy of private struct from storage/ipc/procarray.c)
+ *
+ * TODO Maybe this should be private to connection_limits.c (just like the
+ *      original structure).
+ */
 typedef struct ProcArrayStruct
 {
 	int			numProcs;		/* number of valid procs entries */
@@ -104,15 +110,18 @@ typedef struct ProcArrayStruct
 #else
 	int			procs[1];		/* VARIABLE LENGTH ARRAY */
 #endif
-	
+
 } ProcArrayStruct;
 
+/* cached info about a backend (database name, etc.) */
 typedef struct BackendInfo {
 
 	int			pid;
+
 	char		database[NAMEDATALEN];
 	char		role[NAMEDATALEN];
-	SockAddr 	socket;
 	char		hostname[NAMEDATALEN];
+
+	SockAddr 	socket;
 
 } BackendInfo;
