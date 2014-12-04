@@ -439,10 +439,10 @@ load_rule(int line, const char * dbname, const char * user,
 		{
 			elog(WARNING,
 				 "invalid IP address \"%s\": %s", ipcopy, gai_strerror(ret));
+			pfree(ipcopy);
 			return false;
 		}
 
-		/* FIXME Not freed if the ipaddress is invalid. */
 		pfree(ipcopy);
 
 		/* FIXME This is a bit strange, maybe this should be in the (ret == 0) branch ... */
