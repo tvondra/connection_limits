@@ -7,6 +7,16 @@ Note that the superusers are not restricted by this module - the
 connections are counted, but the connection is not denied (just a
 WARNING is printed).
 
+PostgreSQL itself provides support for basic per-user and per-database
+connection limits:
+
+* http://www.postgresql.org/docs/devel/static/sql-createdatabase.html
+* http://www.postgresql.org/docs/devel/static/sql-createuser.html
+
+Use this extension only if you need more sophisticated rules, either
+combining rules on both fields, or using additional information (IP
+address or hostname).
+
 
 Install
 -------
