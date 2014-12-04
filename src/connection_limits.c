@@ -445,7 +445,6 @@ load_rule(int line, const char * dbname, const char * user,
 
 		pfree(ipcopy);
 
-		/* FIXME This is a bit strange, maybe this should be in the (ret == 0) branch ... */
 		if (gai_result)
 			pg_freeaddrinfo_all(hints.ai_family, gai_result);
 
