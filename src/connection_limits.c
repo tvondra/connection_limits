@@ -889,10 +889,7 @@ backend_update_info(BackendInfo * info, volatile PGPROC *proc,
 					SockAddr socket, char * hostname)
 {
 	info->pid = proc->pid;
-
 	info->backendId = proc->backendId;
-	info->databaseId = proc->databaseId;
-	info->roleId = proc->roleId;
 
 	strcpy(info->database, database);
 	strcpy(info->role, role);
@@ -909,19 +906,16 @@ backend_update_info(BackendInfo * info, volatile PGPROC *proc,
  * Check that the cached backend info is still valid, i.e. if the info
  * still matches.
  *
- * This checks all the info, including backendId etc. which should work
- * just fine even if the backend crashes etc. If the backend crashes and
- * by luck gets the same info (very unlikely), it will be deemed valid.
- * But that's OK, because it's exactly the same (with respect to
- * evaluating the rules).
+ * This checks just the PID and backendId, although even a PID would be
+ * enough, probably. We can't check databaseId/roleId at this moment,
+ * because we don't have this info yet (at least not stored in PGPROC).
+ * This seems to work fine even for closed/crashed backends.
  */
 static bool
 backend_info_is_valid(BackendInfo info, volatile PGPROC *proc)
 {
 	return ((info.pid == proc->pid) &&
-			(info.backendId == proc->backendId) &&
-			(info.databaseId == proc->databaseId) &&
-			(info.roleId == proc->roleId));
+			(info.backendId == proc->backendId));
 }
 
 /*
