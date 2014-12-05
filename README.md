@@ -23,6 +23,32 @@ combining rules on both fields, or based on IP address / hostname
 (which is not available in the core).
 
 
+Limitations
+-----------
+
+The extension evaluates the quotas using the user/database name supplied
+at connection time, and stores them internally. If you rename the user
+or a database, the extension has no idea about this change.
+
+Renaming a database is not a big issue, though, because that requires
+closing all connections, but it may be a problem when renaming users.
+
+This limination is however a natural consequence of storing the rules
+in a static file, using the user/database names (and not OID). Whenever
+you rename a user, you need to modify the file and restart the database.
+
+It's possible to implement the reloading without a cluster restart (let
+me know if you're interested in the functionality).
+
+If we ever get even triggers for the `ALTER USER` command, it might be
+possible to handle the renames automatically, but it's rather tricky
+(think of race conditions that could happen).
+
+If you need to rename users frequently, this extension is probably not
+the extension you're looking for - the built-in `CONNECTION LIMIT`
+option might be a better solution for you.
+
+
 Installation
 ------------
 
