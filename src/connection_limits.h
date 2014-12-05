@@ -13,7 +13,9 @@
 
 /* by default space for 1000 rules */
 #define MAX_RULES		1000
-#define SEGMENT_SIZE	(offsetof(rules_t, rules) + sizeof(rule_t) * MAX_RULES + sizeof(BackendInfo) * MaxBackends)
+#define RULES_SEGMENT_SIZE		(offsetof(rules_t, rules) + sizeof(rule_t) * MAX_RULES)
+#define BACKENDS_SEGMENT_SIZE	(sizeof(BackendInfo) * MaxBackends)
+#define SEGMENT_SIZE			(RULES_SEGMENT_SIZE + BACKENDS_SEGMENT_SIZE)
 #define PROCARRAY_MAXPROCS	(MaxBackends + max_prepared_xacts)
 
 #define LINE_MAXLEN	 1024

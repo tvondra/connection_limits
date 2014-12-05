@@ -118,8 +118,10 @@ void		_PG_fini(void);
 /* listing of current state of connection limit rules */
 
 PG_FUNCTION_INFO_V1(connection_limits);
+PG_FUNCTION_INFO_V1(connection_reload_config);
 
 Datum connection_limits(PG_FUNCTION_ARGS);
+Datum connection_reload_config(PG_FUNCTION_ARGS);
 
 /*
  * Module load callback
@@ -241,7 +243,12 @@ pg_limits_shmem_startup()
 	/* Perform initialization if this is the first time we see the segment. */
 	if (! found)
 	{
-		/* make sure the segment is empty (no rules, ...) */
+		/*
+		 * make sure the segment is empty (no rules, ...)
+		 *
+		 * load_rules() resets only the part where the rules are stored,
+		 * and we need to reset the whole segment (including backend info)
+		 */
 		memset(rules, 0, SEGMENT_SIZE);
 
 		load_rules();
@@ -255,6 +262,21 @@ pg_limits_shmem_startup()
 
 /*
  * Load rules from the file.
+ *
+ * Parses the pg_limits.conf file and loads all the connection rules that
+ * are defined in it. A syntax error should not result in a failure,
+ * only a WARNING message (and skipping the row). If there are too many
+ * rules in the file (exceeding MAX_RULES), that fails with an ERROR.
+ *
+ * FIXME The current implementation modifies the segment in-place, so
+ *       if a config reload fails, the backends will see the result of
+ *       the failed reload. That's not really nice. This should use a
+ *       local buffer an only copy it in place if everything went OK.
+ *
+ * FIXME The other issue is that we're holding ProcArrayLock while
+ *       parsing the file - at the moment this is necessary because of
+ *       the in-place reload. Once this is fixed, we can hold the lock
+ *       only for the final copy (in case of success).
  */
 static void
 load_rules()
@@ -276,6 +298,15 @@ load_rules()
 
 		return;
 	}
+
+	/*
+	 * Use the same lock as when checking the rules (when opening the
+	 * connection) etc. This is probably the right thing to do.
+	 */
+	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
+
+	/* make sure there are no rules (keep the backend info though) */
+	memset(rules, 0, RULES_SEGMENT_SIZE);
 
 	while (fgets(line, LINE_MAXLEN, file) != NULL)
 	{
@@ -311,8 +342,9 @@ load_rules()
 
 	FreeFile(file);
 
-	elog(DEBUG1, "loaded %d connection limit rule(s)", rules->n_rules);
+	LWLockRelease(ProcArrayLock);
 
+	elog(DEBUG1, "loaded %d connection limit rule(s)", rules->n_rules);
 }
 
 static bool
@@ -1107,6 +1139,20 @@ connection_limits(PG_FUNCTION_ARGS)
 		/* Here we are done returning items and just need to clean up: */
 		SRF_RETURN_DONE(funcctx);
 	}
+}
+
+
+Datum
+connection_reload_config(PG_FUNCTION_ARGS)
+{
+	elog(DEBUG1, "reloading connection rules from configuration file");
+
+	load_rules();
+
+	elog(DEBUG1, "connection rules reloaded : %d rules found",
+				 rules->n_rules);
+
+	PG_RETURN_VOID();
 }
 
 
