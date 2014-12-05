@@ -57,9 +57,6 @@ static int default_per_ip = 0;
 /* resets all the counters to 0 */
 static void reset_rules(void);
 
-/* count rules in the config file */
-static int number_of_rules(void);
-
 /* load rules from the file */
 static void load_rules(void);
 
@@ -220,27 +217,19 @@ pg_limits_shmem_startup()
 
 	bool	found = FALSE;
 	char   *segment = NULL;
-	int		n;
 
 	if (prev_shmem_startup_hook)
 		prev_shmem_startup_hook();
 
-	/*
-	 * Create or attach to the shared memory state, including hash table
-	 */
+	/* Create or attach to the shared memory state (for the rules). */
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 
-	/*
-	 * FIXME This is racy, because the file may change between this and actually
-	 *       loading the rules (exceeding MAX_RULES).
-	 */
-	n = number_of_rules();
-
-	if (n > MAX_RULES)
-		elog(ERROR, "too many connection limit rules (file: %d, max: %d)",
-			 n, MAX_RULES);
-
 	segment = ShmemInitStruct(SEGMENT_NAME, SEGMENT_SIZE, &found);
+
+#if (PG_VERSION_NUM < 90000)	/* since 9.0, it always throws an error */
+	if (segment == NULL)
+		elog(ERROR, "a call to ShmemInitStruct failed (connection_limits)");
+#endif
 
 	/* rules are placed first, then the cached backend info */
 	rules = (rules_t*)(segment);
@@ -249,12 +238,7 @@ pg_limits_shmem_startup()
 	elog(DEBUG1, "initializing segment with connection limit rules (size: %lu B)",
 		 SEGMENT_SIZE);
 
-	/*
-	 * FIXME This check should be right after ShmemInitStruct (or maybe just move setting
-	 *       the pointers into the branch. Also, what happens if the segment can't be
-	 *       attached? Do we need to check that, or does the whole startup fail anyway?
-	 *       Maybe we should set some flag and do nothing in the handlers, in that case?
-	 */
+	/* Perform initialization if this is the first time we see the segment. */
 	if (! found)
 	{
 		/* make sure the segment is empty (no rules, ...) */
@@ -262,50 +246,11 @@ pg_limits_shmem_startup()
 
 		load_rules();
 
-		elog(DEBUG1, "shared memory segment (query buffer) successfully created");
+		elog(DEBUG1, "shared memory segment successfully created, %d rules loaded",
+					 rules->n_rules);
 	}
 
 	LWLockRelease(AddinShmemInitLock);
-}
-
-/*
- * Count rules stored in a file.
- */
-static int
-number_of_rules()
-{
-
-	FILE   *file;
-	char	line[LINE_MAXLEN];
-	char	dbname[NAMEDATALEN], user[NAMEDATALEN], mask[NAMEDATALEN], ip[NAMEDATALEN];
-	int	 	limit;
-	int	 	n = 0;
-
-	file = AllocateFile(LIMITS_FILE, "r");
-	if (file == NULL)
-	{
-		ereport(WARNING,
-				(errcode_for_file_access(),
-				 errmsg("could not open configuration file \"%s\": %m",
-						LIMITS_FILE)));
-
-		return 0;
-	}
-
-	/*
-	 * Count rules, i.e. rows with 4 or 5 fields.
-	 *
-	 * TODO Skip lines that are commented-out.
-	 */
-	while (fgets(line, LINE_MAXLEN, file) != NULL)
-		if ((sscanf(line, "%s %s %s %d", dbname, user, ip, &limit) == 4) ||
-			(sscanf(line, "%s %s %s %s %d", dbname, user, ip, mask, &limit) == 5))
-			n++;
-
-	FreeFile(file);
-
-	return n;
-
 }
 
 /*
@@ -374,8 +319,14 @@ static bool
 load_rule(int line, const char * dbname, const char * user,
 		  const char * ip, const char * mask, int limit)
 {
+	rule_t * rule;
+
+	/* error if the segment is already full (no space for another rule) */
+	if (rules->n_rules == MAX_RULES)
+		elog(ERROR, "too many connection limit rules (max: %d)", MAX_RULES);
+
 	/* get space for the next rule */
-	rule_t * rule = &(rules->rules[rules->n_rules]);
+	rule = &(rules->rules[rules->n_rules]);
 	memset(rule, 0, sizeof(rule_t));
 
 	/* reset the rule (no fields) */
