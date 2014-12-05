@@ -86,10 +86,11 @@ static bool check_ip(SockAddr *raddr, struct sockaddr * addr, struct sockaddr * 
 
 static void attach_procarray(void);
 
-static bool backend_info_is_valid(BackendInfo info, pid_t pid);
+static bool backend_info_is_valid(BackendInfo info, volatile PGPROC *proc);
 
-static void backend_update_info(BackendInfo * info, pid_t pid, char * database,
-								char * role, SockAddr socket, char * hostname);
+static void backend_update_info(BackendInfo * info, volatile PGPROC *proc,
+								char * database, char * role,
+								SockAddr socket, char * hostname);
 
 static bool is_super_user(char * rolename);
 
@@ -596,13 +597,13 @@ check_rules(Port *port, int status)
 			}
 
 			/* store the backend info into a cache */
-			backend_update_info(&backends[proc->backendId], proc->pid,
-								port->database_name, port->user_name, port->raddr,
-								port->remote_hostname);
+			backend_update_info(&backends[proc->backendId], proc,
+								port->database_name, port->user_name,
+								port->raddr, port->remote_hostname);
 		}
 
 		/* if the backend info is valid, */
-		if (backend_info_is_valid(backends[proc->backendId], proc->pid))
+		if (backend_info_is_valid(backends[proc->backendId], proc))
 		{
 
 			/* see if the database/user/IP matches */
@@ -735,7 +736,7 @@ check_all_rules(void)
 			continue;
 
 		/* do this only for valid backends */
-		if (backend_info_is_valid(backends[proc->backendId], proc->pid))
+		if (backend_info_is_valid(backends[proc->backendId], proc))
 		{
 
 			/* FIXME This should probably refresh the hostname (using pg_getnameinfo_all) */
@@ -932,35 +933,44 @@ attach_procarray()
  * excessive number of lookups etc.).
  */
 static void
-backend_update_info(BackendInfo * info, pid_t pid, char * database, char * role,
+backend_update_info(BackendInfo * info, volatile PGPROC *proc,
+					char * database, char * role,
 					SockAddr socket, char * hostname)
 {
+	info->pid = proc->pid;
 
-	info->pid = pid;
-	info->hostname[0] = '\0';
+	info->backendId = proc->backendId;
+	info->databaseId = proc->databaseId;
+	info->roleId = proc->roleId;
 
 	strcpy(info->database, database);
 	strcpy(info->role, role);
 	memcpy(&info->socket, &socket, sizeof(SockAddr));
 
-	/* update the hostname, but carefully as it may be NULL */
+	/* update the hostname (if it's NULL, use empty string) */
 	if (hostname != NULL)
 		strcpy(info->hostname, hostname);
+	else
+		info->hostname[0] = '\0';
 }
 
 /*
- * Check that the cached backend info is still valid, i.e. if the PID still matches.
+ * Check that the cached backend info is still valid, i.e. if the info
+ * still matches.
  *
- * FIXME If the backend is not valid, the info should be reset (probably), so that
- *       there are no leftovers after crashed backends.
- *
- * FIXME Maybe this should check additional info, to prevent issues with a crashed
- *       connection and another connection getting the same PID by luck.
+ * This checks all the info, including backendId etc. which should work
+ * just fine even if the backend crashes etc. If the backend crashes and
+ * by luck gets the same info (very unlikely), it will be deemed valid.
+ * But that's OK, because it's exactly the same (with respect to
+ * evaluating the rules).
  */
 static bool
-backend_info_is_valid(BackendInfo info, pid_t pid)
+backend_info_is_valid(BackendInfo info, volatile PGPROC *proc)
 {
-	return (info.pid == pid);
+	return ((info.pid == proc->pid) &&
+			(info.backendId == proc->backendId) &&
+			(info.databaseId == proc->databaseId) &&
+			(info.roleId == proc->roleId));
 }
 
 /*

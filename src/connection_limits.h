@@ -118,6 +118,10 @@ typedef struct BackendInfo {
 
 	int			pid;
 
+	BackendId	backendId;
+	Oid			databaseId;
+	Oid			roleId;
+
 	char		database[NAMEDATALEN];
 	char		role[NAMEDATALEN];
 	char		hostname[NAMEDATALEN];
