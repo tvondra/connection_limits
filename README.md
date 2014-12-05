@@ -1,100 +1,127 @@
-Setting connection quotas
-=========================
-This PostgreSQL extension allows you to set connection quotas for each
+connection_limits
+=================
+
+This PostgreSQL extension allows you to set connection quotas based on
 database, user, IP (or a combination of those values).
 
 Note that the superusers are not restricted by this module - the
 connections are counted, but the connection is not denied (just a
-WARNING is printed).
+WARNING is printed). So for example if there's a database with a limit
+of 5 connections, there may be 10 superusers connected to it (and no
+connections from regular users will be allowed until at least 6 of
+those superusers disconnect).
 
-PostgreSQL itself provides support for basic per-user and per-database
-connection limits:
+PostgreSQL itself provides built-in support for basic per-user and
+per-database connection quotas - see the `CONNECTION LIMIT` option
+available for corresponding commands:
 
 * http://www.postgresql.org/docs/devel/static/sql-createdatabase.html
 * http://www.postgresql.org/docs/devel/static/sql-createuser.html
 
 Use this extension only if you need more sophisticated rules, either
-combining rules on both fields, or using additional information (IP
-address or hostname).
+combining rules on both fields, or based on IP address / hostname
+(which is not available in the core).
 
 
-Install
--------
-Installing the extension is quite simple. First you need to do is this:
+Installation
+------------
 
-    $ make install
+The easiest way is to install this extension from PGXN, which is as
+simple as this
 
-which installs a library to $libdir (pg_config --pkglibdir).
+    $ pgxnclient load -d mydb connection_limits
 
-Now you need to update postgresql.conf so that the shared library is
-loaded when the cluster starts.
+Now you need to update `postgresql.conf` so that the shared library is
+loaded when the cluster starts (so that it can request space in shared
+memory segment, etc.).
 
     shared_preload_libraries = 'connection_limits'
 
-Restart the database (so that the shared library is loaded).
+This change requires a restart of the cluster (the library needs to
+request space in shared memory, and that can only happen when starting
+the cluster). You need to define the quota rules first, however.
+
+Instead of using the PGXN client, you may also install the extension
+from sources, which is almost as simple as using `pgxnclient`. First
+obtain the sources somehow (e.g. by cloning the github repository),
+and then do is this:
+
+    $ make install
+
+which installs a library to $libdir (pg_config --pkglibdir). Then just
+update the `shared_preload_libraries` as explained.
 
 
 GUC variables
 -------------
-There are three GUC variables that set basic connection limits
+
+There are three GUC variables that allow you to specify default rules
 
     connection_limits.per_database
     connection_limits.per_user
     connection_limits.per_ip
 
 This allows you to set default per-database, per-user and per-IP limits.
-For example by this
+For example with this configuration
 
     connection_limits.per_user = 5
 
 all users (except superusers - see above) will be allowed to open at
-most 5 connections at the same time. The same holds for databases
-and IPs.
+most 5 connections at the same time. Similarly for databases and IPs.
 
-By default those values are 0 (disabled).
+By default those values are 0 (which means there is no default quota).
 
-If you need to define some exceptions (e.g. higher values for some of
-the users), you can do that quite easily using a rule.
+The rules in the configuration file (explained in the next section)
+take precendence over the defaults. So you may define a default using
+a GUC variable, and then define some exceptions (e.g. higher values for
+some databases or users) using a targetted rule.
 
 
-Config
-------
-The last thing you need to do is to create the configuration file with
-rules, defining the connection quotas. The file should be placed in the
-data directory, the expected filename is pg_limits.conf.
+Configuration
+-------------
+
+The quota rules are read from a configuration file `pg_limits.conf`,
+placed in the data directory. You may create it using like this:
 
     $ touch data/pg_limits.conf
 
-and the format is very simple, with four or five columns:
+The format is very simple, resembling `pg_hba.conf` a bit, with either
+four or five columns (the `mask` column is optional):
 
     database     username    IP    [mask]    limit
 
-A special value 'all' means 'do not check' so for example this rule
+A special value 'all' means 'do not check this field' so for example
 
     all          foouser     all             10
 
 means user 'foouser' can create up to 10 connections in total. He may
-be connected to one database or 10 different databases, it does not
-matter - he's allowed to create 10 connections in total. This rules
+open 10 connections to one database or 10 different databases, it does
+not matter - he's allowed to create 10 connections in total. This rule
 
     foodb         all        all             10
 
-means there will be at most 10 connection to the 'foodb' database. You
-may of course combine those rules, so this
+means there will be at most 10 connection to the 'foodb' database,
+irrespectedly what user opens it, what is the source IP address etc.
+
+You may of course combine those fields, so a rule like this
 
     foodb         foouser    all             10
 
 means the user 'foouser' can create at most 10 connections to 'foodb'.
 Other users are not limited at all, and even 'foouser' may create
-unlimited number of connections to other databases.
+unlimited number of connections to other databases. (Well, it's not
+exactly unlimited, there can't be more than `maxconnections` connections
+in total, but it's not limited by this extension.)
 
-There are two ways to specify an IP address - the mask may be specified
-as part of the IP, or separately. The following two rules are equal
+So far none of the rules specified an IP address. There are two ways to
+do that - the mask may be specified as part of the IP, or separately.
+For example, these two rules are exactly the same:
 
     all    all    all    192.168.1.0/24                    10
     all    all    all    192.168.1.0      255.255.255.0    10
 
-So basically it's just like in pg_hba.conf.
+It's possible to specify a hostname too, which is useful when the IP
+may change etc. Again, this is exactly like `pg_hba.conf`.
 
 
 Combining GUC variables and rules
@@ -121,9 +148,9 @@ specified - user, database or IP.
 
 Current state of limits
 -----------------------
-If you want to see the current status of limits, use 'connection_limits'
-view. Just do this:
+If you want to see the current state of the rules (how many connections
+match each rule), use 'connection_limits' view. Just do this:
 
     db=# select * from conneection_limits;
 
-and you'll see which limits are almost exhausted etc.
+and you'll see which quotas are almost reached, etc.
