@@ -22,14 +22,14 @@ Install
 -------
 Installing the extension is quite simple. First you need to do is this:
 
-   $ make install
+    $ make install
 
 which installs a library to $libdir (pg_config --pkglibdir).
 
 Now you need to update postgresql.conf so that the shared library is
 loaded when the cluster starts.
 
-   shared_preload_libraries = 'connection_limits'
+    shared_preload_libraries = 'connection_limits'
 
 Restart the database (so that the shared library is loaded).
 
@@ -38,14 +38,14 @@ GUC variables
 -------------
 There are three GUC variables that set basic connection limits
 
-  connection_limits.per_database
-  connection_limits.per_user
-  connection_limits.per_ip
+    connection_limits.per_database
+    connection_limits.per_user
+    connection_limits.per_ip
 
 This allows you to set default per-database, per-user and per-IP limits.
 For example by this
 
-  connection_limits.per_user = 5
+    connection_limits.per_user = 5
 
 all users (except superusers - see above) will be allowed to open at
 most 5 connections at the same time. The same holds for databases
@@ -63,7 +63,7 @@ The last thing you need to do is to create the configuration file with
 rules, defining the connection quotas. The file should be placed in the
 data directory, the expected filename is pg_limits.conf.
 
-   $ touch data/pg_limits.conf
+    $ touch data/pg_limits.conf
 
 and the format is very simple, with four or five columns:
 
@@ -124,6 +124,6 @@ Current state of limits
 If you want to see the current status of limits, use 'connection_limits'
 view. Just do this:
 
-  db=# select * from conneection_limits;
+    db=# select * from conneection_limits;
 
 and you'll see which limits are almost exhausted etc.
