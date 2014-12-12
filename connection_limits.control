@@ -1,5 +1,5 @@
-# query_recorder
-comment = 'Allows recording of SQL queries to a separate file.'
+# connection limits (quotas)
+comment = 'Allows setting various connection quotas (per user, db or IP address).'
 default_version = '1.0.0'
 relocatable = true
 
